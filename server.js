@@ -15,7 +15,7 @@ app.use(express.json());
  console.log("PGPORT:", process.env.PGPORT);
 
 const pool = new Pool({
-   host: process.env.PGHOST,
+  host: process.env.PGHOST,
   port: Number(process.env.PGPORT || 5432),
   database: process.env.PGDATABASE,
   user: process.env.PGUSER,

@@ -2,24 +2,24 @@ const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
 const ExcelJS = require("exceljs");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
 
 const app = express();
 const port = process.env.PORT || 3001;
+const JWT_SECRET = process.env.JWT_SECRET || "schimba-aceasta-cheie-imediat";
 
 app.use(cors());
 app.use(express.json());
 
- console.log("PGHOST:", process.env.PGHOST);
- console.log("PGUSER:", process.env.PGUSER);
- console.log("PGDATABASE:", process.env.PGDATABASE);
- console.log("PGPORT:", process.env.PGPORT);
+const isSupabase = (process.env.PGHOST || "").includes("supabase.com");
 
 const pool = new Pool({
-  host: process.env.PGHOST,
-  port: Number(process.env.PGPORT || 5432),
-  database: process.env.PGDATABASE,
-  user: process.env.PGUSER,
-  password: process.env.PGPASSWORD,
+  host: "aws-1-eu-west-3.pooler.supabase.com",
+  port: 5432,
+  database: "postgres",
+  user: "postgres.iydpqvxvwzqmvmhfwdey",
+  password: "HellScream101Independence!877",
   ssl: {
     rejectUnauthorized: false,
   },
@@ -34,10 +34,108 @@ async function query(sql, params = []) {
   }
 }
 
+function generateToken(user) {
+  return jwt.sign(
+    {
+      id: user.id_utilizator,
+      email: user.email,
+      rol: user.rol,
+    },
+    JWT_SECRET,
+    { expiresIn: "7d" }
+  );
+}
+
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.startsWith("Bearer ")
+    ? authHeader.split(" ")[1]
+    : null;
+
+  if (!token) {
+    return res.status(401).json({ error: "Token lipsă." });
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (_error) {
+    return res.status(403).json({ error: "Token invalid sau expirat." });
+  }
+}
+
+function authorizeRoles(...roles) {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ error: "Neautentificat." });
+    }
+
+    if (!roles.includes(req.user.rol)) {
+      return res.status(403).json({ error: "Nu ai permisiunea necesară." });
+    }
+
+    next();
+  };
+}
+
 function notFound(res, entity) {
   return res.status(404).json({ error: `${entity} nu a fost găsit(ă).` });
 }
 
+// AUTH
+app.post("/api/login", async (req, res) => {
+  try {
+    const { email, parola } = req.body;
+
+    if (!email || !parola) {
+      return res.status(400).json({ error: "Email și parolă obligatorii." });
+    }
+
+    const result = await query(
+      `SELECT id_utilizator, nume, email, parola_hash, rol, activ
+       FROM utilizatori
+       WHERE email = $1`,
+      [email]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ error: "Email sau parolă greșită." });
+    }
+
+    const user = result.rows[0];
+
+    if (!user.activ) {
+      return res.status(403).json({ error: "Cont inactiv." });
+    }
+
+    const parolaCorecta = await bcrypt.compare(parola, user.parola_hash);
+
+    if (!parolaCorecta) {
+      return res.status(401).json({ error: "Email sau parolă greșită." });
+    }
+
+    const token = generateToken(user);
+
+    res.json({
+      token,
+      user: {
+        id: user.id_utilizator,
+        nume: user.nume,
+        email: user.email,
+        rol: user.rol,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/me", authenticateToken, async (req, res) => {
+  res.json({ user: req.user });
+});
+
+// HEALTH
 app.get("/api/health", async (_req, res) => {
   try {
     await query("SELECT 1");
@@ -48,16 +146,18 @@ app.get("/api/health", async (_req, res) => {
 });
 
 // SANTIERE
-app.get("/api/santiere", async (_req, res) => {
+app.get("/api/santiere", authenticateToken, authorizeRoles("admin", "operator", "viewer"), async (_req, res) => {
   try {
-    const result = await query("SELECT id_santier, nume, locatie, data_start, data_sfarsit, status, created_at FROM santiere ORDER BY id_santier DESC");
+    const result = await query(
+      "SELECT id_santier, nume, locatie, data_start, data_sfarsit, status, created_at FROM santiere ORDER BY id_santier DESC"
+    );
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.post("/api/santiere", async (req, res) => {
+app.post("/api/santiere", authenticateToken, authorizeRoles("admin", "operator"), async (req, res) => {
   try {
     const { nume, locatie, data_start, data_sfarsit, status } = req.body;
     if (!nume || !locatie) return res.status(400).json({ error: "Câmpurile nume și locatie sunt obligatorii." });
@@ -72,7 +172,7 @@ app.post("/api/santiere", async (req, res) => {
   }
 });
 
-app.put("/api/santiere/:id", async (req, res) => {
+app.put("/api/santiere/:id", authenticateToken, authorizeRoles("admin", "operator"), async (req, res) => {
   try {
     const { id } = req.params;
     const { nume, locatie, data_start, data_sfarsit, status } = req.body;
@@ -87,7 +187,7 @@ app.put("/api/santiere/:id", async (req, res) => {
   }
 });
 
-app.delete("/api/santiere/:id", async (req, res) => {
+app.delete("/api/santiere/:id", authenticateToken, authorizeRoles("admin"), async (req, res) => {
   try {
     const result = await query("DELETE FROM santiere WHERE id_santier=$1 RETURNING *", [req.params.id]);
     if (!result.rows.length) return notFound(res, "Șantierul");
@@ -98,16 +198,18 @@ app.delete("/api/santiere/:id", async (req, res) => {
 });
 
 // ECHIPE
-app.get("/api/echipe", async (_req, res) => {
+app.get("/api/echipe", authenticateToken, authorizeRoles("admin", "operator", "viewer"), async (_req, res) => {
   try {
-    const result = await query("SELECT id_echipa, nume, sef_echipa, telefon, descriere, created_at FROM echipe ORDER BY id_echipa DESC");
+    const result = await query(
+      "SELECT id_echipa, nume, sef_echipa, telefon, descriere, created_at FROM echipe ORDER BY id_echipa DESC"
+    );
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.post("/api/echipe", async (req, res) => {
+app.post("/api/echipe", authenticateToken, authorizeRoles("admin", "operator"), async (req, res) => {
   try {
     const { nume, sef_echipa, telefon, descriere } = req.body;
     if (!nume) return res.status(400).json({ error: "Câmpul nume este obligatoriu." });
@@ -121,7 +223,7 @@ app.post("/api/echipe", async (req, res) => {
   }
 });
 
-app.put("/api/echipe/:id", async (req, res) => {
+app.put("/api/echipe/:id", authenticateToken, authorizeRoles("admin", "operator"), async (req, res) => {
   try {
     const { nume, sef_echipa, telefon, descriere } = req.body;
     const result = await query(
@@ -135,7 +237,7 @@ app.put("/api/echipe/:id", async (req, res) => {
   }
 });
 
-app.delete("/api/echipe/:id", async (req, res) => {
+app.delete("/api/echipe/:id", authenticateToken, authorizeRoles("admin"), async (req, res) => {
   try {
     const result = await query("DELETE FROM echipe WHERE id_echipa=$1 RETURNING *", [req.params.id]);
     if (!result.rows.length) return notFound(res, "Echipa");
@@ -146,7 +248,7 @@ app.delete("/api/echipe/:id", async (req, res) => {
 });
 
 // FURNIZORI
-app.get("/api/furnizori", async (_req, res) => {
+app.get("/api/furnizori", authenticateToken, authorizeRoles("admin", "operator", "viewer"), async (_req, res) => {
   try {
     const result = await query("SELECT id_furnizor, nume, persoana_contact, telefon, email, adresa, created_at FROM furnizori ORDER BY id_furnizor DESC");
     res.json(result.rows);
@@ -155,7 +257,7 @@ app.get("/api/furnizori", async (_req, res) => {
   }
 });
 
-app.post("/api/furnizori", async (req, res) => {
+app.post("/api/furnizori", authenticateToken, authorizeRoles("admin", "operator"), async (req, res) => {
   try {
     const { nume, persoana_contact, telefon, email, adresa } = req.body;
     if (!nume) return res.status(400).json({ error: "Câmpul nume este obligatoriu." });
@@ -169,7 +271,7 @@ app.post("/api/furnizori", async (req, res) => {
   }
 });
 
-app.put("/api/furnizori/:id", async (req, res) => {
+app.put("/api/furnizori/:id", authenticateToken, authorizeRoles("admin", "operator"), async (req, res) => {
   try {
     const { nume, persoana_contact, telefon, email, adresa } = req.body;
     const result = await query(
@@ -183,7 +285,7 @@ app.put("/api/furnizori/:id", async (req, res) => {
   }
 });
 
-app.delete("/api/furnizori/:id", async (req, res) => {
+app.delete("/api/furnizori/:id", authenticateToken, authorizeRoles("admin"), async (req, res) => {
   try {
     const result = await query("DELETE FROM furnizori WHERE id_furnizor=$1 RETURNING *", [req.params.id]);
     if (!result.rows.length) return notFound(res, "Furnizorul");
@@ -194,7 +296,7 @@ app.delete("/api/furnizori/:id", async (req, res) => {
 });
 
 // MATERIALE
-app.get("/api/materiale", async (_req, res) => {
+app.get("/api/materiale", authenticateToken, authorizeRoles("admin", "operator", "viewer"), async (_req, res) => {
   try {
     const result = await query("SELECT m.id_material, m.denumire, m.categorie, m.unitate_masura, m.pret_unitar, m.stoc_curent, m.id_furnizor, f.nume AS furnizor FROM materiale m LEFT JOIN furnizori f ON f.id_furnizor = m.id_furnizor ORDER BY m.id_material DESC");
     res.json(result.rows);
@@ -203,7 +305,7 @@ app.get("/api/materiale", async (_req, res) => {
   }
 });
 
-app.post("/api/materiale", async (req, res) => {
+app.post("/api/materiale", authenticateToken, authorizeRoles("admin", "operator"), async (req, res) => {
   try {
     const { id_furnizor, denumire, categorie, unitate_masura, pret_unitar, stoc_curent } = req.body;
     if (!id_furnizor || !denumire || !unitate_masura) return res.status(400).json({ error: "id_furnizor, denumire și unitate_masura sunt obligatorii." });
@@ -217,7 +319,7 @@ app.post("/api/materiale", async (req, res) => {
   }
 });
 
-app.put("/api/materiale/:id", async (req, res) => {
+app.put("/api/materiale/:id", authenticateToken, authorizeRoles("admin", "operator"), async (req, res) => {
   try {
     const { id_furnizor, denumire, categorie, unitate_masura, pret_unitar, stoc_curent } = req.body;
     const result = await query(
@@ -231,7 +333,7 @@ app.put("/api/materiale/:id", async (req, res) => {
   }
 });
 
-app.delete("/api/materiale/:id", async (req, res) => {
+app.delete("/api/materiale/:id", authenticateToken, authorizeRoles("admin"), async (req, res) => {
   try {
     const result = await query("DELETE FROM materiale WHERE id_material=$1 RETURNING *", [req.params.id]);
     if (!result.rows.length) return notFound(res, "Materialul");
@@ -242,7 +344,7 @@ app.delete("/api/materiale/:id", async (req, res) => {
 });
 
 // PROIECTE
-app.get("/api/proiecte", async (_req, res) => {
+app.get("/api/proiecte", authenticateToken, authorizeRoles("admin", "operator", "viewer"), async (_req, res) => {
   try {
     const result = await query("SELECT p.id_proiect, p.nume, p.descriere, p.data_start, p.data_sfarsit, p.buget, p.status, p.id_santier, s.nume AS santier, p.id_echipa, e.nume AS echipa FROM proiecte p JOIN santiere s ON s.id_santier = p.id_santier JOIN echipe e ON e.id_echipa = p.id_echipa ORDER BY p.id_proiect DESC");
     res.json(result.rows);
@@ -251,7 +353,7 @@ app.get("/api/proiecte", async (_req, res) => {
   }
 });
 
-app.post("/api/proiecte", async (req, res) => {
+app.post("/api/proiecte", authenticateToken, authorizeRoles("admin", "operator"), async (req, res) => {
   try {
     const { id_santier, id_echipa, nume, descriere, data_start, data_sfarsit, buget, status } = req.body;
     if (!id_santier || !id_echipa || !nume) return res.status(400).json({ error: "id_santier, id_echipa și nume sunt obligatorii." });
@@ -265,7 +367,7 @@ app.post("/api/proiecte", async (req, res) => {
   }
 });
 
-app.put("/api/proiecte/:id", async (req, res) => {
+app.put("/api/proiecte/:id", authenticateToken, authorizeRoles("admin", "operator"), async (req, res) => {
   try {
     const { id_santier, id_echipa, nume, descriere, data_start, data_sfarsit, buget, status } = req.body;
     const result = await query(
@@ -279,7 +381,7 @@ app.put("/api/proiecte/:id", async (req, res) => {
   }
 });
 
-app.delete("/api/proiecte/:id", async (req, res) => {
+app.delete("/api/proiecte/:id", authenticateToken, authorizeRoles("admin"), async (req, res) => {
   try {
     const result = await query("DELETE FROM proiecte WHERE id_proiect=$1 RETURNING *", [req.params.id]);
     if (!result.rows.length) return notFound(res, "Proiectul");
@@ -290,7 +392,7 @@ app.delete("/api/proiecte/:id", async (req, res) => {
 });
 
 // UTILAJE
-app.get("/api/utilaje", async (_req, res) => {
+app.get("/api/utilaje", authenticateToken, authorizeRoles("admin", "operator", "viewer"), async (_req, res) => {
   try {
     const result = await query("SELECT id_utilaj, denumire, tip, serie, stare, cost_ora, created_at FROM utilaje ORDER BY id_utilaj DESC");
     res.json(result.rows);
@@ -299,7 +401,7 @@ app.get("/api/utilaje", async (_req, res) => {
   }
 });
 
-app.post("/api/utilaje", async (req, res) => {
+app.post("/api/utilaje", authenticateToken, authorizeRoles("admin", "operator"), async (req, res) => {
   try {
     const { denumire, tip, serie, stare, cost_ora } = req.body;
     if (!denumire) return res.status(400).json({ error: "Câmpul denumire este obligatoriu." });
@@ -313,7 +415,7 @@ app.post("/api/utilaje", async (req, res) => {
   }
 });
 
-app.put("/api/utilaje/:id", async (req, res) => {
+app.put("/api/utilaje/:id", authenticateToken, authorizeRoles("admin", "operator"), async (req, res) => {
   try {
     const { denumire, tip, serie, stare, cost_ora } = req.body;
     const result = await query(
@@ -327,7 +429,7 @@ app.put("/api/utilaje/:id", async (req, res) => {
   }
 });
 
-app.delete("/api/utilaje/:id", async (req, res) => {
+app.delete("/api/utilaje/:id", authenticateToken, authorizeRoles("admin"), async (req, res) => {
   try {
     const result = await query("DELETE FROM utilaje WHERE id_utilaj=$1 RETURNING *", [req.params.id]);
     if (!result.rows.length) return notFound(res, "Utilajul");
@@ -338,7 +440,7 @@ app.delete("/api/utilaje/:id", async (req, res) => {
 });
 
 // ALOCARI UTILAJE
-app.get("/api/alocari-utilaje", async (_req, res) => {
+app.get("/api/alocari-utilaje", authenticateToken, authorizeRoles("admin", "operator", "viewer"), async (_req, res) => {
   try {
     const result = await query("SELECT a.id_alocare, a.id_utilaj, u.denumire AS utilaj, a.id_proiect, p.nume AS proiect, a.data_start, a.data_sfarsit, a.ore_folosite, a.observatii FROM alocari_utilaje a JOIN utilaje u ON u.id_utilaj = a.id_utilaj JOIN proiecte p ON p.id_proiect = a.id_proiect ORDER BY a.id_alocare DESC");
     res.json(result.rows);
@@ -347,7 +449,7 @@ app.get("/api/alocari-utilaje", async (_req, res) => {
   }
 });
 
-app.post("/api/alocari-utilaje", async (req, res) => {
+app.post("/api/alocari-utilaje", authenticateToken, authorizeRoles("admin", "operator"), async (req, res) => {
   try {
     const { id_utilaj, id_proiect, data_start, data_sfarsit, ore_folosite, observatii } = req.body;
     if (!id_utilaj || !id_proiect || !data_start) return res.status(400).json({ error: "id_utilaj, id_proiect și data_start sunt obligatorii." });
@@ -361,7 +463,7 @@ app.post("/api/alocari-utilaje", async (req, res) => {
   }
 });
 
-app.put("/api/alocari-utilaje/:id", async (req, res) => {
+app.put("/api/alocari-utilaje/:id", authenticateToken, authorizeRoles("admin", "operator"), async (req, res) => {
   try {
     const { id_utilaj, id_proiect, data_start, data_sfarsit, ore_folosite, observatii } = req.body;
     const result = await query(
@@ -375,7 +477,7 @@ app.put("/api/alocari-utilaje/:id", async (req, res) => {
   }
 });
 
-app.delete("/api/alocari-utilaje/:id", async (req, res) => {
+app.delete("/api/alocari-utilaje/:id", authenticateToken, authorizeRoles("admin"), async (req, res) => {
   try {
     const result = await query("DELETE FROM alocari_utilaje WHERE id_alocare=$1 RETURNING *", [req.params.id]);
     if (!result.rows.length) return notFound(res, "Alocarea");
@@ -386,7 +488,7 @@ app.delete("/api/alocari-utilaje/:id", async (req, res) => {
 });
 
 // CONSUM STOC
-app.get("/api/consum-stoc", async (_req, res) => {
+app.get("/api/consum-stoc", authenticateToken, authorizeRoles("admin", "operator", "viewer"), async (_req, res) => {
   try {
     const result = await query("SELECT cs.id_consum_stoc, cs.id_material, m.denumire AS material, cs.id_proiect, p.nume AS proiect, cs.tip_miscare, cs.cantitate, cs.cantitate_ajustare, cs.data_miscare, cs.document_referinta, cs.observatii, cs.created_at FROM consum_stoc cs JOIN materiale m ON m.id_material = cs.id_material LEFT JOIN proiecte p ON p.id_proiect = cs.id_proiect ORDER BY cs.id_consum_stoc DESC");
     res.json(result.rows);
@@ -395,7 +497,7 @@ app.get("/api/consum-stoc", async (_req, res) => {
   }
 });
 
-app.post("/api/consum-stoc", async (req, res) => {
+app.post("/api/consum-stoc", authenticateToken, authorizeRoles("admin", "operator"), async (req, res) => {
   try {
     const { id_material, id_proiect, tip_miscare, cantitate, cantitate_ajustare, data_miscare, document_referinta, observatii } = req.body;
     if (!id_material || !tip_miscare || !cantitate) return res.status(400).json({ error: "id_material, tip_miscare și cantitate sunt obligatorii." });
@@ -409,7 +511,7 @@ app.post("/api/consum-stoc", async (req, res) => {
   }
 });
 
-app.put("/api/consum-stoc/:id", async (req, res) => {
+app.put("/api/consum-stoc/:id", authenticateToken, authorizeRoles("admin", "operator"), async (req, res) => {
   try {
     const { id_material, id_proiect, tip_miscare, cantitate, cantitate_ajustare, data_miscare, document_referinta, observatii } = req.body;
     const result = await query(
@@ -423,7 +525,7 @@ app.put("/api/consum-stoc/:id", async (req, res) => {
   }
 });
 
-app.delete("/api/consum-stoc/:id", async (req, res) => {
+app.delete("/api/consum-stoc/:id", authenticateToken, authorizeRoles("admin"), async (req, res) => {
   try {
     const result = await query("DELETE FROM consum_stoc WHERE id_consum_stoc=$1 RETURNING *", [req.params.id]);
     if (!result.rows.length) return notFound(res, "Mișcarea de stoc");
@@ -434,7 +536,7 @@ app.delete("/api/consum-stoc/:id", async (req, res) => {
 });
 
 // DASHBOARD
-app.get("/api/dashboard", async (_req, res) => {
+app.get("/api/dashboard", authenticateToken, authorizeRoles("admin", "operator", "viewer"), async (_req, res) => {
   try {
     const [santiere, proiecte, materiale, utilaje, consumuri] = await Promise.all([
       query("SELECT COUNT(*)::int AS total FROM santiere"),
@@ -471,7 +573,7 @@ async function sendWorkbook(res, sheetName, rows, filename) {
   res.end();
 }
 
-app.get("/api/export/proiecte.xlsx", async (_req, res) => {
+app.get("/api/export/proiecte.xlsx", authenticateToken, authorizeRoles("admin", "operator", "viewer"), async (_req, res) => {
   try {
     const result = await query('SELECT p.id_proiect AS "ID", p.nume AS "Proiect", s.nume AS "Santier", e.nume AS "Echipa", p.status AS "Status", COALESCE(p.buget,0) AS "Buget", p.data_start AS "Data start", p.data_sfarsit AS "Data sfarsit" FROM proiecte p JOIN santiere s ON s.id_santier = p.id_santier JOIN echipe e ON e.id_echipa = p.id_echipa ORDER BY p.id_proiect DESC');
     await sendWorkbook(res, "Proiecte", result.rows, "proiecte.xlsx");
@@ -480,7 +582,7 @@ app.get("/api/export/proiecte.xlsx", async (_req, res) => {
   }
 });
 
-app.get("/api/export/materiale.xlsx", async (_req, res) => {
+app.get("/api/export/materiale.xlsx", authenticateToken, authorizeRoles("admin", "operator", "viewer"), async (_req, res) => {
   try {
     const result = await query('SELECT m.id_material AS "ID", m.denumire AS "Material", m.categorie AS "Categorie", f.nume AS "Furnizor", m.unitate_masura AS "UM", m.pret_unitar AS "Pret unitar", m.stoc_curent AS "Stoc curent" FROM materiale m LEFT JOIN furnizori f ON f.id_furnizor = m.id_furnizor ORDER BY m.id_material DESC');
     await sendWorkbook(res, "Materiale", result.rows, "materiale.xlsx");
@@ -489,7 +591,7 @@ app.get("/api/export/materiale.xlsx", async (_req, res) => {
   }
 });
 
-app.get("/api/export/consum.xlsx", async (_req, res) => {
+app.get("/api/export/consum.xlsx", authenticateToken, authorizeRoles("admin", "operator", "viewer"), async (_req, res) => {
   try {
     const result = await query('SELECT cs.id_consum_stoc AS "ID", m.denumire AS "Material", p.nume AS "Proiect", cs.tip_miscare AS "Tip", cs.cantitate AS "Cantitate", cs.data_miscare AS "Data", cs.document_referinta AS "Document", cs.observatii AS "Observatii" FROM consum_stoc cs JOIN materiale m ON m.id_material = cs.id_material LEFT JOIN proiecte p ON p.id_proiect = cs.id_proiect ORDER BY cs.id_consum_stoc DESC');
     await sendWorkbook(res, "Consum", result.rows, "consum.xlsx");
@@ -506,18 +608,3 @@ app.use((err, _req, res, _next) => {
 app.listen(port, () => {
   console.log(`Serverul rulează pe http://localhost:${port}`);
 });
-
-/*
-Instalare:
-npm install express cors pg exceljs
-
-Export Excel:
-http://localhost:3001/api/export/proiecte.xlsx
-http://localhost:3001/api/export/materiale.xlsx
-http://localhost:3001/api/export/consum.xlsx
-
-Backup automat - exemplu backup_santier.bat:
-@echo off
-set PGPASSWORD=HellScream101
-"C:\Program Files\PostgreSQL\16\bin\pg_dump.exe" -h localhost -p 5433 -U postgres -d Gestiune_Santier -F c -f "D:\backup\gestiune_santier_%date:~-4,4%-%date:~3,2%-%date:~0,2%.backup"
-*/

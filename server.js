@@ -9,12 +9,13 @@ const port = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
+ console.log("PGHOST:", process.env.PGHOST);
+ console.log("PGUSER:", process.env.PGUSER);
+ console.log("PGDATABASE:", process.env.PGDATABASE);
+ console.log("PGPORT:", process.env.PGPORT);
+
 const pool = new Pool({
-  console.log("PGHOST:", process.env.PGHOST);
-  console.log("PGUSER:", process.env.PGUSER);
-  console.log("PGDATABASE:", process.env.PGDATABASE);
-  console.log("PGPORT:", process.env.PGPORT);
-  host: process.env.PGHOST,
+   host: process.env.PGHOST,
   port: Number(process.env.PGPORT || 5432),
   database: process.env.PGDATABASE,
   user: process.env.PGUSER,

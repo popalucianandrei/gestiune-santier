@@ -1,0 +1,5 @@
+node_modules
+frontend-santier/node_modules
+dist
+frontend-santier/dist
+.env
